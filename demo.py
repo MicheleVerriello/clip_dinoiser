@@ -59,44 +59,62 @@ def visualize_per_image(file_path: str, TEXT_PROMPTS: List[str], model: torch.nn
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='CLIP-DINOiser demo')
-    parser.add_argument('--cfg', help='config file name', default='clip_dinoiser.yaml')
-    parser.add_argument('--prompts', help='List of textual prompts', required=True, type=list_of_strings)
-    parser.add_argument('--checkpoint_path', help='Path to the checkpoint file', default='./checkpoints/last.pt')
-    parser.add_argument('--output_dir', help='Directory to save the output', default='.', required=False)
-    parser.add_argument('--file_path', help='Path to the image file', required=True)
-
+    parser = argparse.ArgumentParser(description='Demo for CLIP-DINOiser')
+    parser.add_argument('--file_path', type=str, required=True, help='Path to the input image')
+    parser.add_argument('--support_images', type=str, nargs='+', required=True, help='Paths to the support images')
     args = parser.parse_args()
     return args
 
 def list_of_strings(arg):
     return arg.split(',')
 
-if __name__ == '__main__':
+def load_image(image_path):
+    image = Image.open(image_path).convert('RGB')
+    transform = T.Compose([
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+    ])
+    return transform(image).unsqueeze(0)
+
+def load_support_images(support_image_paths):
+    support_images = [load_image(image_path) for image_path in support_image_paths]
+    return torch.cat(support_images, dim=0)
+
+
+def main():
     args = parse_args()
-    cfg = compose(config_name=args.cfg)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    prompts = args.prompts
+    
+    # Load the input image
+    input_image = load_image(args.file_path)
+    
+    # Load the support images
+    support_images = load_support_images(args.support_images)
+    
+    # Initialize the model
+    model = build_model()
+    
+    # Generate embeddings for the support images
+    with torch.no_grad():
+        support_embeddings = model.clip_backbone.encode_image(support_images)
+    
+    # Perform inference using the support embeddings
+    h, w = input_image.shape[-2:]
+    output = model(input_image, support_embeddings).cpu()
+    output = F.interpolate(output, scale_factor=model.vit_patch_size, mode="bilinear", align_corners=False)[..., :h, :w]
+    output = output[0].argmax(dim=0)
+    mask = mask2rgb(output, PALETTE)
+    
+    # Visualize the results
+    fig = plt.figure(figsize=(3, 1))
+    classes = np.unique(output).tolist()
+    plt.imshow(np.array(itemgetter(*classes)(PALETTE)).reshape(1, -1, 3))
+    plt.xticks(np.arange(len(classes)), [f"Class {i}" for i in classes], rotation=45)
+    plt.yticks([])
+    plt.savefig(os.path.join(output_dir, f'{name}_labels.png'), bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    
+    return mask, fig, input_image
 
-    if len(args.prompts) == 0:
-        print("Please provide your prompts in the correct format")
-    else:
-        if len(args.prompts) == 1:
-            prompts = ['background'] + args.prompts
-        model = build_model(cfg.model, class_names=prompts)
-
-        assert os.path.isfile(args.checkpoint_path), "Checkpoint file doesn't exist"
-        checkpoint = torch.load(args.checkpoint_path, map_location='cpu')
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-
-        model.eval()
-        model.to(device)
-        if 'background' in prompts:
-            model.apply_found = True
-        else:
-            model.apply_found = False
-        print(args.prompts)
-        os.path.exists(args.output_dir)
-
-        visualize_per_image(args.file_path, prompts, model, device, args.output_dir)
+if __name__ == '__main__':
+    main()

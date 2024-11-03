@@ -13,6 +13,7 @@ from mmseg.ops import resize
 from omegaconf import OmegaConf
 
 from models.builder import MODELS, build_model
+from open_clip import get_tokenizer, create_model_from_pretrained
 
 NORMALIZE = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
@@ -227,7 +228,8 @@ class CLIP_DINOiser(DinoCLIP):
 
     def __init__(self, clip_backbone, class_names, vit_arch="vit_base", vit_patch_size=16, enc_type_feats="v",
                  feats_idx=-3, gamma=0.2, delta=0.99, in_dim=256, conv_kernel=3):
-        super(CLIP_DINOiser, self).__init__(clip_backbone, class_names, vit_arch, vit_patch_size, enc_type_feats, gamma)
+        super(CLIP_DINOiser, self).__init__(clip_backbone, class_names, vit_arch, vit_patch_size, enc_type_feats, gamma, delta)
+        self.decode_head = MaskClipHead(clip_backbone, class_names, in_channels=in_dim, text_channels=512, use_templates=False, pretrained=None)
 
         in_size = 768 if feats_idx != 'final' else 512
         self.gamma = gamma
@@ -292,4 +294,52 @@ class CLIP_DINOiser(DinoCLIP):
             uncertain = (output.max(dim=1)[0] < self.delta).reshape(-1)
             output.reshape(1, nb_cls, -1)[:, 0, uncertain & (~r_hard_found.bool())] = 1.0  # background class
 
+        return output
+
+
+class MaskClipHead(nn.Module):
+    def __init__(self, clip_model, class_names, in_channels=3, text_channels=512, use_templates=False, pretrained=None, **kwargs):
+        super(MaskClipHead, self).__init__()
+
+        self.text_channels = text_channels
+        self.clip_model = clip_model
+        self.pretrained = pretrained
+        self.class_names = class_names
+        self.in_channels = in_channels
+        self.use_templates = use_templates
+        self.tokenizer = get_tokenizer(clip_model)
+        model, _ = create_model_from_pretrained(clip_model, pretrained=pretrained)
+        model.eval()
+        self.register_buffer("class_embeddings", self._get_class_embeddings(model, class_names))
+        self.proj = nn.Conv2d(self.in_channels, text_channels, 1, bias=False)
+        self.proj.weight = nn.Parameter(model.visual.proj.t()[:, :, None, None])
+
+    @torch.no_grad()
+    def update_vocab(self, embeddings):
+        self.class_embeddings = embeddings
+
+    def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: list):
+        aug_embeddings = torch.stack([self._embed_label(text_model, label) for label in class_names])
+        aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
+        return aug_embeddings.squeeze(1)
+
+    def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
+        tokens = self.tokenizer(label)
+        tokens = tokens.unsqueeze(0).to(next(text_model.parameters()).device)
+        with torch.no_grad():
+            embeddings = text_model.encode_text(tokens)
+        return embeddings
+
+    def forward(self, inputs, return_feat=False):
+        v = inputs
+        feat = self.proj(v)
+        output = self.cls_seg(feat)
+        if return_feat:
+            return output, feat
+        return output
+
+    def cls_seg(self, feat):
+        feat = feat / feat.norm(dim=1, keepdim=True)
+        output = F.conv2d(feat, self.class_embeddings[:, :, None, None])
+        output = F.softmax(output * 100, dim=1)
         return output
