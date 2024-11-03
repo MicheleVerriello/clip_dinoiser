@@ -189,3 +189,9 @@ class MaskClipHead(nn.Module):
         output = F.conv2d(feat, self.class_embeddings[:, :, None, None])
         output = F.softmax(output * 100, dim=1)
         return output
+
+    def set_support_images(self, support_images):
+        """
+        Imposta le immagini di supporto nel modello.
+        """
+        self.support_images = support_images  # Imposta le immagini come attributo del modello

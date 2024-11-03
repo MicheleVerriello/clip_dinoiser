@@ -208,3 +208,9 @@ class DinoCLIP(nn.Module):
                 mode='bilinear',
                 align_corners=False)
             h_m
+
+    def set_support_images(self, support_images):
+        """
+        Imposta le immagini di supporto nel modello.
+        """
+        self.support_images = support_images  # Memorizza le immagini come attributo del modello
