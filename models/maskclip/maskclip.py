@@ -154,6 +154,17 @@ class MaskClipHead(nn.Module):
         self.class_embeddings = self._get_class_embeddings(model, class_names)
 
     @torch.no_grad()
+    def update_vocab(self, images):
+        model, _ = create_model_from_pretrained(self.clip_model, pretrained=self.pretrained)
+        model.eval()
+
+        # transform to tensors
+
+        # from tensors to embeddings
+
+        self.class_embeddings = self._get_class_embeddings(model, class_names)
+
+    @torch.no_grad()
     def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
         """
         Encode label name into a single vector
@@ -175,6 +186,9 @@ class MaskClipHead(nn.Module):
         # normalize vector
         aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
         return aug_embeddings.squeeze(1)
+
+    def _get_images_embeddings(self, image_model: torch.nn.Module, images: List[Tensor]):
+        # generate embeddings
 
     def forward(self, inputs, return_feat=False):
         v = inputs
