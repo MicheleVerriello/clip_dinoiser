@@ -272,28 +272,43 @@ class CLIP_DINOiser(DinoCLIP):
 
         return bkg_out, corrs, clip_proj_feats
 
-    def forward(self, x: torch.Tensor):
-        preds, corrs, output = self.forward_pass(x)
-        B, C, hf, wf = output.shape
-        preds = F.interpolate(preds, (hf, wf), mode="bilinear", align_corners=False)
+    def compare_features(self, support_features, query_features, threshold=0.5):
+        """
+        Compare features between support and query images
+        """
+        similarities = torch.matmul(query_features, support_features.transpose(1, 2))
+        return similarities > threshold
 
-        # Compute weighted pooling --------------------------------------------------
-        if self.gamma:
-            corrs[corrs < self.gamma] = 0.0
-        out_feats = self.compute_weighted_pool(output, corrs)
+    def get_support_features(self, support_images: torch.Tensor):
+        """
+        Extract features from support images
+        """
+        support_features, _ = self.get_clip_features(support_images)
+        return support_features
 
-        # Get the predictions --------------------------------------------------
-        output = self.clip_backbone.decode_head.cls_seg(out_feats)
-
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, support_images: torch.Tensor = None):
+        x = self.make_input_divisible(x)
+        output, raw_similarities = self.get_clip_features(x)
+        
+        if support_images is not None:
+            support_features = self.get_support_features(support_images)
+            similarities = self.compare_features(support_features, output)
+            output = output * similarities.float()
+        
+        B, _, H_feat, W_feat = output.shape
+        masks = self.get_dino_corrs(x)
+        output = self.compute_weighted_pool(output, masks)
+        output = self.clip_backbone.decode_head.cls_seg(output)
+        
         if self.apply_found:
-            # Compute FOUND --------------------------------------------------
-            soft_found = torch.sigmoid(preds.detach())
-            r_soft_found = soft_found.reshape(-1)
+            preds = self.get_found_preds(x)
+            r_soft_found = T.functional.resize(preds, (H_feat, W_feat)).reshape(-1)
             nb_cls = output.shape[1]
             r_hard_found = (r_soft_found > 0.5).float()
             uncertain = (output.max(dim=1)[0] < self.delta).reshape(-1)
-            output.reshape(1, nb_cls, -1)[:, 0, uncertain & (~r_hard_found.bool())] = 1.0  # background class
-
+            output.reshape(1, nb_cls, -1)[:, 0, uncertain & (~r_hard_found.bool())] = 1.0
+        
         return output
 
 
@@ -322,6 +337,9 @@ class MaskClipHead(nn.Module):
         aug_embeddings = torch.stack([self._embed_label(text_model, label) for label in class_names])
         aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
         return aug_embeddings.squeeze(1)
+
+    # def _get_image_embeddings(self, image_model: torch.nn.Module, images: list):
+    #     # to implement
 
     def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
         tokens = self.tokenizer(label)

@@ -67,6 +67,7 @@ class MaskClip(nn.Module):
 
         _ = self.backbone(inputs)
         v = self.hook_features["v"]
+        print("Shape of v before permute:", v.shape)
         v = self.extract_v(v, self.backbone.visual.transformer.resblocks[-1]).permute(1, 0, 2)
         v = self.backbone.visual.ln_post(v)
         v = v[:, 1:]
@@ -85,7 +86,6 @@ class MaskClip(nn.Module):
         v += x
         v += block.mlp(block.ln_2(v))
         return v
-
 
     @staticmethod
     def resize_pos_embed(pos_embed, input_shpae, pos_shape, mode):
@@ -117,21 +117,21 @@ class MaskClip(nn.Module):
         pos_embed = torch.cat((cls_token_weight, pos_embed_weight), dim=1)
         return pos_embed
 
-    def forward(self, inputs: Tensor, return_feat=False) -> Tensor:
+    def forward(self, inputs: Tensor, support_images=None, return_feat=False) -> Tensor:
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input."""
         inputs = self.clip_T(inputs)
         x = self.extract_feat(inputs)
         if return_feat:
-            seg_logits, feats = self.decode_head(x, return_feat)
+            seg_logits, feats = self.decode_head(x, support_images=support_images, return_feat=return_feat)
             return seg_logits, feats
         else:
-            seg_logits = self.decode_head(x)
+            seg_logits = self.decode_head(x, support_images=support_images)
         return seg_logits
 
+@MODELS.register_module()
 class MaskClipHead(nn.Module):
-    def __init__(self, clip_model, class_names, in_channels=3, text_channels=512, use_templates=False, pretrained=None,
-                 **kwargs):
+    def __init__(self, clip_model, class_names, in_channels=3, text_channels=512, use_templates=False, pretrained=None, **kwargs):
         super(MaskClipHead, self).__init__()
 
         self.text_channels = text_channels
@@ -148,51 +148,32 @@ class MaskClipHead(nn.Module):
         self.proj.weight = nn.Parameter(model.visual.proj.t()[:, :, None, None])
 
     @torch.no_grad()
-    def update_vocab(self, class_names):
-        model, _ = create_model_from_pretrained(self.clip_model, pretrained=self.pretrained )
-        model.eval()
-        self.class_embeddings = self._get_class_embeddings(model, class_names)
+    def update_vocab(self, embeddings):
+        self.class_embeddings = embeddings
 
-    @torch.no_grad()
-    def update_vocab(self, images):
-        model, _ = create_model_from_pretrained(self.clip_model, pretrained=self.pretrained)
-        model.eval()
-
-        # transform to tensors
-
-        # from tensors to embeddings
-
-        self.class_embeddings = self._get_class_embeddings(model, class_names)
-
-    @torch.no_grad()
-    def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
-        """
-        Encode label name into a single vector
-        """
-        if self.use_templates:
-            templates = imagenet_templates
-        elif "laion" in self.pretrained:
-            templates = ['a photo of a {}', 'a photo of an {}']
-        else:
-            templates = ['a {}']
-        all_prompts = [self.tokenizer(template.format(label)) for template in templates]
-        out = text_model.encode_text(torch.cat(all_prompts))
-        out /= out.norm(dim=-1, keepdim=True)
-        out = out.mean(dim=0)
-        return out
-
-    def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: List[str]):
+    def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: list):
         aug_embeddings = torch.stack([self._embed_label(text_model, label) for label in class_names])
-        # normalize vector
         aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
         return aug_embeddings.squeeze(1)
 
-    def _get_images_embeddings(self, image_model: torch.nn.Module, images: List[Tensor]):
-        # generate embeddings
+    def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
+        tokens = self.tokenizer(label)
+        tokens = tokens.unsqueeze(0).to(next(text_model.parameters()).device)
+        with torch.no_grad():
+            embeddings = text_model.encode_text(tokens)
+        return embeddings
 
-    def forward(self, inputs, return_feat=False):
+    def _get_image_embeddings(self, image_model: torch.nn.Module, images: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            image_embeddings = image_model.encode_image(images)
+        return image_embeddings
+
+    def forward(self, inputs, support_images=None, return_feat=False):
         v = inputs
         feat = self.proj(v)
+        if support_images is not None:
+            image_embeddings = self._get_image_embeddings(self.clip_model, support_images)
+            self.class_embeddings = image_embeddings / image_embeddings.norm(dim=-1, keepdim=True)
         output = self.cls_seg(feat)
         if return_feat:
             return output, feat
