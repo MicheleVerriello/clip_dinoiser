@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------------------------------
 # CLIP-DINOiser
 # authors: Monika Wysoczanska, Warsaw University of Technology
-
+import numpy as np
 # Copyright (c) OpenMMLab. All rights reserved.
 # Modified version of the original MaskCLIP code: https://github.com/chongzhou96/MaskCLIP/tree/master
 # ---------------------------------------------------------------------------------------------------
@@ -9,6 +9,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL.Image import Image
 from mmseg.ops import resize
 from typing import List, Tuple
 from torch import Tensor
@@ -28,20 +29,22 @@ class MaskClip(nn.Module):
             decode_head,
             clip_model,
             class_names
-        ):
+    ):
         super(MaskClip, self).__init__()
 
-        self.decode_head = eval(decode_head.get('type'))(clip_model, class_names, **decode_head)
+        self.decode_head = MaskClipHead(clip_model, class_names, **decode_head)
         self.patch_size = backbone.get('patch_size')
-        self.img_size = tuple([backbone.get('img_size', 224)]*2)
+        self.img_size = tuple([backbone.get('img_size', 224)] * 2)
         pretrained = decode_head.get("pretrained")
         model, _ = create_model_from_pretrained(clip_model, pretrained=pretrained)
         model.eval()
         self.clip_T = OPENAI_NORMALIZE
         self.hook_features = {}
         self.backbone = model
+
         def hook_fn_forward(module, input, output):
             self.hook_features["v"] = output
+
         self.backbone.visual.transformer.resblocks[-2].register_forward_hook(hook_fn_forward)
         self._positional_embd = nn.Parameter(self.backbone.visual.positional_embedding.data.clone())
 
@@ -52,7 +55,7 @@ class MaskClip(nn.Module):
 
         B, C, H, W = inputs.shape
         hw_shape = (H // self.patch_size, W // self.patch_size)
-        x_len, pos_len = hw_shape[0]*hw_shape[1], pos_embed.shape[0]
+        x_len, pos_len = hw_shape[0] * hw_shape[1], pos_embed.shape[0]
 
         if x_len != pos_len:
             if pos_len == (self.img_size[0] // self.patch_size) * (self.img_size[1] // self.patch_size) + 1:
@@ -63,7 +66,7 @@ class MaskClip(nn.Module):
                     '{}, {}'.format(x_len, pos_len))
 
             self.backbone.visual.positional_embedding.data = self.resize_pos_embed(
-                self._positional_embd[None], hw_shape,  (pos_h, pos_w), 'bicubic')[0]
+                self._positional_embd[None], hw_shape, (pos_h, pos_w), 'bicubic')[0]
 
         _ = self.backbone(inputs)
         v = self.hook_features["v"]
@@ -85,7 +88,6 @@ class MaskClip(nn.Module):
         v += x
         v += block.mlp(block.ln_2(v))
         return v
-
 
     @staticmethod
     def resize_pos_embed(pos_embed, input_shpae, pos_shape, mode):
@@ -117,21 +119,21 @@ class MaskClip(nn.Module):
         pos_embed = torch.cat((cls_token_weight, pos_embed_weight), dim=1)
         return pos_embed
 
-    def forward(self, inputs: Tensor, return_feat=False) -> Tensor:
+    def forward(self, inputs: Tensor, support_images=None, return_feat=False) -> Tensor:
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input."""
         inputs = self.clip_T(inputs)
         x = self.extract_feat(inputs)
         if return_feat:
-            seg_logits, feats = self.decode_head(x, return_feat)
+            seg_logits, feats = self.decode_head(x, support_images=support_images, return_feat=return_feat)
             return seg_logits, feats
         else:
-            seg_logits = self.decode_head(x)
+            seg_logits = self.decode_head(x, support_images=support_images)
         return seg_logits
 
 class MaskClipHead(nn.Module):
     def __init__(self, clip_model, class_names, in_channels=3, text_channels=512, use_templates=False, pretrained=None,
-                 **kwargs):
+                 support_img_size=(224, 224), **kwargs):
         super(MaskClipHead, self).__init__()
 
         self.text_channels = text_channels
@@ -140,6 +142,8 @@ class MaskClipHead(nn.Module):
         self.class_names = class_names
         self.in_channels = in_channels
         self.use_templates = use_templates
+        self.support_img_size = support_img_size  # Aggiungi una dimensione per le immagini di supporto
+
         self.tokenizer = get_tokenizer(clip_model)
         model, _ = create_model_from_pretrained(clip_model, pretrained=pretrained)
         model.eval()
@@ -147,16 +151,44 @@ class MaskClipHead(nn.Module):
         self.proj = nn.Conv2d(self.in_channels, text_channels, 1, bias=False)
         self.proj.weight = nn.Parameter(model.visual.proj.t()[:, :, None, None])
 
+        # Aggiungi un attributo per le feature delle immagini di supporto
+        self.support_features = None
+
+
     @torch.no_grad()
     def update_vocab(self, class_names):
         model, _ = create_model_from_pretrained(self.clip_model, pretrained=self.pretrained )
         model.eval()
         self.class_embeddings = self._get_class_embeddings(model, class_names)
 
-    @torch.no_grad()
+    # @torch.no_grad()
+    # def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
+    #     """
+    #     Encode label name into a single vector
+    #     """
+    #     if self.use_templates:
+    #         templates = imagenet_templates
+    #     elif "laion" in self.pretrained:
+    #         templates = ['a photo of a {}', 'a photo of an {}']
+    #     else:
+    #         templates = ['a {}']
+    #     all_prompts = [self.tokenizer(template.format(label)) for template in templates]
+    #     out = text_model.encode_text(torch.cat(all_prompts))
+    #     out /= out.norm(dim=-1, keepdim=True)
+    #     out = out.mean(dim=0)
+    #     return out
+    #
+    # def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: List[str]):
+    #     aug_embeddings = torch.stack([self._embed_label(text_model, label) for label in class_names])
+    #     # normalize vector
+    #     aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
+    #     final = aug_embeddings.squeeze(1)
+    #     print("Class embeddings shape: ", final.shape)
+    #     return final
+
     def _embed_label(self, text_model: torch.nn.Module, label: str) -> torch.Tensor:
         """
-        Encode label name into a single vector
+        Encodifica il nome della label in un vettore
         """
         if self.use_templates:
             templates = imagenet_templates
@@ -170,22 +202,91 @@ class MaskClipHead(nn.Module):
         out = out.mean(dim=0)
         return out
 
-    def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: List[str]):
+    def _get_class_embeddings(self, text_model: torch.nn.Module, class_names: List[str]) -> Tensor:
+        """
+        Ottiene gli embeddings delle classi. Ora usiamo le immagini di supporto invece dei testi.
+        """
         aug_embeddings = torch.stack([self._embed_label(text_model, label) for label in class_names])
-        # normalize vector
+        # Normalizza i vettori
         aug_embeddings = aug_embeddings / aug_embeddings.norm(dim=-1, keepdim=True)
-        return aug_embeddings.squeeze(1)
+        final = aug_embeddings.squeeze(1)
+        print("Class embeddings shape: ", final.shape)
+        return final
 
-    def forward(self, inputs, return_feat=False):
+    # def forward(self, inputs, return_feat=False):
+    #     v = inputs
+    #     feat = self.proj(v)
+    #     output = self.cls_seg(feat)
+    #     if return_feat:
+    #         return output, feat
+    #     return output
+    #
+    # def cls_seg(self, feat):
+    #     feat = feat / feat.norm(dim=1, keepdim=True)
+    #     output = F.conv2d(feat, self.class_embeddings[:, :, None, None])
+    #     output = F.softmax(output * 100, dim=1)
+    #     return output
+
+    def forward(self, inputs: Tensor, support_images: Tensor = None, return_feat=False) -> Tensor:
+        """
+        Codifica le immagini con il backbone e decodifica in una mappa di segmentazione
+        """
+        if support_images is not None:
+            self.update_support_features(support_images)  # Aggiorna le feature delle immagini di supporto
+
+        # Estrai le feature dall'immagine di input
         v = inputs
         feat = self.proj(v)
+
+        # Usa le feature delle immagini di supporto (self.support_features) per il confronto
+        if self.support_features is not None:
+            # Qui il confronto delle feature delle immagini di supporto con quelle dell'immagine di input
+            # Esegui un'operazione di similarità o altro tipo di elaborazione
+            similarity = torch.matmul(feat.flatten(2), self.support_features.flatten(2).transpose(1, 2))
+            print("Similarity shape: ", similarity.shape)
+            # Aggiungi il risultato della similarità o del confronto alle maschere di segmentazione
+
         output = self.cls_seg(feat)
+
         if return_feat:
             return output, feat
         return output
 
     def cls_seg(self, feat):
+        """
+        Genera la segmentazione dalla feature, con un'integrazione opzionale della similarità.
+        """
         feat = feat / feat.norm(dim=1, keepdim=True)
         output = F.conv2d(feat, self.class_embeddings[:, :, None, None])
         output = F.softmax(output * 100, dim=1)
         return output
+
+    # Funzione per estrarre feature da una lista di immagini di supporto
+    @torch.no_grad()
+    def extract_support_features(self, support_images: Tensor) -> Tensor:
+        """
+        Estrae le feature dalle immagini di supporto
+        """
+
+        # Supponiamo che `images_tensor` sia il tensore [3, C, H, W]
+        images_pil = []
+
+        for img_tens in support_images:
+            # Estrai l'immagine e convertila in numpy [H, W, C]
+            image_np = img_tens.permute(1, 2, 0).numpy()
+
+            # Normalizza i valori per essere tra 0 e 255, e convertili in interi
+            image_np = (image_np * 255).astype(np.uint8)
+
+            # Converti in PIL.Image e aggiungi alla lista
+            image_pil = Image.fromarray(image_np)
+            images_pil.append(image_pil)
+
+        support_features = self.clip_model.encode_image(images_pil)
+        return support_features / support_features.norm(dim=-1, keepdim=True)
+
+    def update_support_features(self, support_images: Tensor):
+        """
+        Funzione per aggiornare le feature delle immagini di supporto
+        """
+        self.support_features = self.extract_support_features(support_images)
