@@ -240,11 +240,13 @@ class MaskClipHead(nn.Module):
 
         # Usa le feature delle immagini di supporto (self.support_features) per il confronto
         if self.support_features is not None:
-            # Qui il confronto delle feature delle immagini di supporto con quelle dell'immagine di input
-            # Esegui un'operazione di similarità o altro tipo di elaborazione
+            # Confronta le feature dell'immagine di input con quelle delle immagini di supporto
             similarity = torch.matmul(feat.flatten(2), self.support_features.flatten(2).transpose(1, 2))
             print("Similarity shape: ", similarity.shape)
-            # Aggiungi il risultato della similarità o del confronto alle maschere di segmentazione
+
+            # Modula le feature in base alla similarità: ad esempio, aggiungendo o moltiplicando
+            similarity = similarity.view(feat.shape[0], -1, feat.shape[2], feat.shape[3])  # Ridimensiona per broadcast
+            feat = feat + similarity  # Potresti anche usare feat * similarity per modulazione
 
         output = self.cls_seg(feat)
 
