@@ -5,8 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="3fc34501-f213-483f-bbb6-e6598a2291a9" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/datasets_custom.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/configs/clip_dinoiser.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/clip_dinoiser.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/demo.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/demo.ipynb" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -124,7 +123,7 @@
       <workItem from="1730891547936" duration="2954000" />
       <workItem from="1730894507509" duration="5566000" />
       <workItem from="1730904055358" duration="89000" />
-      <workItem from="1730904156830" duration="27631000" />
+      <workItem from="1730904156830" duration="33150000" />
     </task>
     <servers />
   </component>
