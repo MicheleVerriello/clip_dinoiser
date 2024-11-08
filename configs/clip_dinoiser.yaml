@@ -41,6 +41,23 @@ evaluate:
     - coco_stuff
     - cityscapes
     - ade20k
+data:
+  test:
+    pipeline:
+      - type: LoadImageFromFile
+      - type: LoadAnnotations
+      - type: Resize
+        img_scale: (512, 512)
+        keep_ratio: True
+      - type: Normalize
+        mean: [123.675, 116.28, 103.53]
+        std: [58.395, 57.12, 57.375]
+        to_rgb: True
+      - type: Pad
+        size_divisor: 32
+      - type: DefaultFormatBundle
+      - type: Collect
+        keys: ['img', 'gt_semantic_seg']
 
   # evaluation
   voc: segmentation/configs/_base_/datasets/pascal_voc12.py
